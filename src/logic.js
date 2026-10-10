@@ -5,134 +5,191 @@
 //  |    |   \ / __ \|  |  |  | |  |_\  ___/ \___ \|   |  \/ __ \|    <\  ___/
 //  |________/(______/__|  |__| |____/\_____>______>___|__(______/__|__\_____>
 //
-// ESTE É O ARQUIVO QUE VOCÊ VAI EDITAR. Todo o resto do projeto existe
-// só para levar o estado do jogo até as quatro funções abaixo.
-//
-// Para começar, já deixamos pronta a lógica que impede a sua cobra de andar
-// para trás (ela morreria na hora). Os TODOs marcam os próximos passos.
-// Documentação: https://docs.battlesnake.com
+ // Estratégia Battlesnake: sobrevivência, espaço, alimento e pressão tática.
+ // Substitua o conteúdo de logic.js por este arquivo em um template JavaScript.
 
-// GET / — chamado quando você cadastra a cobra no site e a cada partida.
-// Controla a aparência dela. Opções de cabeça, cauda e cor:
-// https://docs.battlesnake.com/guides/customizations
+const DIRECOES = [
+  { nome: 'up', x: 0, y: 1 },
+  { nome: 'right', x: 1, y: 0 },
+  { nome: 'down', x: 0, y: -1 },
+  { nome: 'left', x: -1, y: 0 },
+];
+
+const AJUSTES = {
+  limiteBusca: 300,
+  vidaParaPriorizarComida: 48,
+  penalidadePerigo: 135,
+  recompensaEspaco: 3.6,
+  penalidadeCorredor: 180,
+  penalidadeCabeca: 2400,
+};
+
+const chave = ({ x, y }) => `${x},${y}`;
+const distancia = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+const igual = (a, b) => a.x === b.x && a.y === b.y;
+const avanca = (p, d) => ({ x: p.x + d.x, y: p.y + d.y });
+
 export function info() {
-  if (process.env.DEBUG === "true") {
-    console.log("INFO");
-  }
-
   return {
-    apiversion: "1",
-    author: "",           // TODO: coloque aqui o SEU usuário do Battlesnake
-    color: "#8B0000",     // TODO: escolha a cor da sua cobra
-    head: "tiger-king",   // TODO: escolha a cabeça
-    tail: "hook",         // TODO: escolha a cauda
-    version: "1.0.0",
+    apiversion: '1',
+    author: '', 
+    color: '#176B87',
+    head: 'tiger-king',
+    tail: 'hook',
+    version: '1.1.0',
   };
 }
 
-// POST /start — chamado uma vez, quando a partida começa.
-// Bom lugar para preparar qualquer estado inicial.
 export function start(gameState) {
-  console.log(`JOGO COMEÇOU (partida ${gameState.game.id})`);
+  if (process.env.DEBUG === 'true') console.log(`Início: ${gameState.game.id}`);
 }
 
-// POST /end — chamado uma vez, quando a partida termina.
 export function end(gameState) {
-  console.log(`FIM DE JOGO após ${gameState.turn} turnos`);
+  if (process.env.DEBUG === 'true') console.log(`Fim: ${gameState.game.id}, turno ${gameState.turn}`);
 }
 
-// POST /move — chamado a cada turno. Aqui mora a inteligência da sua cobra.
-// Precisa devolver "up", "down", "left" ou "right".
-// Exemplo do JSON recebido: https://docs.battlesnake.com/api/example-move
+function analisarEstado(estado) {
+  const { board, you } = estado;
+  const rivais = (board.snakes || []).filter(s => s.id !== you.id);
+  const dentro = p => p.x >= 0 && p.y >= 0 && p.x < board.width && p.y < board.height;
+  const ocupadas = new Set();
+
+  
+  for (const cobra of board.snakes || []) {
+    const corpo = cobra.body || [];
+    const cauda = corpo.at(-1);
+    const repetida = corpo.length > 1 && igual(cauda, corpo.at(-2));
+    const limite = repetida ? corpo.length : corpo.length - 1;
+    for (let i = 0; i < limite; i++) ocupadas.add(chave(corpo[i]));
+  }
+
+  const ameacas = new Set();
+  for (const rival of rivais) {
+    if ((rival.body?.length || 0) < (you.body?.length || 0)) continue;
+    for (const d of DIRECOES) {
+      const p = avanca(rival.head || rival.body[0], d);
+      if (dentro(p)) ameacas.add(chave(p));
+    }
+  }
+
+  const perigos = new Set((board.hazards || []).map(chave));
+  const alimentos = board.food || [];
+  const danoPerigo = Number(estado.game?.ruleset?.settings?.hazardDamagePerTurn ?? 14);
+
+  return { board, you, rivais, dentro, ocupadas, ameacas, perigos, alimentos, danoPerigo };
+}
+
+function explorar(inicio, contexto, bloqueios) {
+  const visitados = new Set([chave(inicio)]);
+  const fila = [{ p: inicio, passos: 0 }];
+  let saidas = 0;
+  let comidaProxima = Infinity;
+  const comidas = new Set(contexto.alimentos.map(chave));
+
+  for (let i = 0; i < fila.length && i < AJUSTES.limiteBusca; i++) {
+    const atual = fila[i];
+
+    if (comidas.has(chave(atual.p))) {
+      comidaProxima = Math.min(comidaProxima, atual.passos);
+    }
+
+    for (const direcao of DIRECOES) {
+      const proximo = avanca(atual.p, direcao);
+      const id = chave(proximo);
+
+      if (!contexto.dentro(proximo) || bloqueios.has(id) || visitados.has(id)) continue;
+
+      if (atual.passos === 0) saidas++;
+      visitados.add(id);
+      fila.push({ p: proximo, passos: atual.passos + 1 });
+    }
+  }
+
+  return { area: visitados.size, saidas, comidaProxima };
+}
+
+function pontuar(direcao, contexto) {
+  const { you, rivais, dentro, ocupadas, ameacas, perigos, alimentos, danoPerigo } = contexto;
+  const destino = avanca(you.head || you.body[0], direcao);
+  const id = chave(destino);
+
+  if (!dentro(destino) || ocupadas.has(id)) return -Infinity;
+
+  const comeAgora = alimentos.some(f => igual(f, destino));
+  const dano = perigos.has(id) ? danoPerigo : 0;
+  const vidaApos = comeAgora ? 100 : you.health - 1 - dano;
+
+  if (vidaApos <= 0) return -Infinity;
+
+  if (comeAgora) {
+    for (const cobra of contexto.board.snakes || []) {
+      const cauda = cobra.body?.at(-1);
+      if (cauda && igual(destino, cauda)) return -Infinity;
+    }
+  }
+
+  const bloqueios = new Set(ocupadas);
+  bloqueios.delete(id);
+
+  const mapa = explorar(destino, contexto, bloqueios);
+  const tamanho = you.body.length;
+
+  let pontos = AJUSTES.recompensaEspaco * Math.min(mapa.area, tamanho * 5 + 15);
+
+  if (mapa.area < tamanho + 3) {
+    pontos -= AJUSTES.penalidadeCorredor + 35 * (tamanho + 3 - mapa.area);
+  }
+
+  if (mapa.saidas <= 1) pontos -= 75;
+  if (ameacas.has(id)) pontos -= AJUSTES.penalidadeCabeca;
+  if (perigos.has(id)) pontos -= AJUSTES.penalidadePerigo + dano * 5;
+
+  const urgente = you.health <= AJUSTES.vidaParaPriorizarComida ||
+    (mapa.comidaProxima !== Infinity && vidaApos <= mapa.comidaProxima + 12);
+
+  const maiorRival = Math.max(0, ...rivais.map(s => s.body.length));
+  const pesoComida = urgente ? 500 : tamanho <= maiorRival + 1 ? 155 : 65;
+
+  if (mapa.comidaProxima !== Infinity) {
+    pontos += pesoComida / (mapa.comidaProxima + 1);
+  }
+
+  if (comeAgora) pontos += urgente ? 175 : 50;
+
+  if (!urgente && tamanho > maiorRival) {
+    const menores = rivais.filter(s => s.body.length < tamanho);
+
+    if (menores.length) {
+      const perto = Math.min(
+        ...menores.map(s => distancia(destino, s.head || s.body[0]))
+      );
+      pontos += 24 / (perto + 1);
+    }
+  }
+
+  pontos += (
+    contexto.board.width -
+    Math.abs(destino.x - (contexto.board.width - 1) / 2)
+  ) * 0.015;
+
+  return pontos;
+}
+
 export function move(gameState) {
-  const isMoveSafe = {
-    up: true,
-    down: true,
-    left: true,
-    right: true,
-  };
+  const contexto = analisarEstado(gameState);
 
-  // --- Impedir que a cobra ande para trás (já implementado) ---
-  // O pescoço é a parte do corpo logo atrás da cabeça. Voltar por cima dele
-  // é morte certa, então marcamos aquela direção como insegura.
-  const myHead = gameState.you.body[0];
-  const myNeck = gameState.you.body[1];
+  const candidatos = DIRECOES.map(d => ({
+    nome: d.nome,
+    nota: pontuar(d, contexto)
+  }));
 
-  if (myNeck.x < myHead.x) {
-    // pescoço à esquerda da cabeça -> não vá para a esquerda
-    isMoveSafe.left = false;
-  } else if (myNeck.x > myHead.x) {
-    // pescoço à direita da cabeça -> não vá para a direita
-    isMoveSafe.right = false;
-  } else if (myNeck.y < myHead.y) {
-    // pescoço abaixo da cabeça -> não desça
-    isMoveSafe.down = false;
-  } else if (myNeck.y > myHead.y) {
-    // pescoço acima da cabeça -> não suba
-    isMoveSafe.up = false;
+  candidatos.sort((a, b) => b.nota - a.nota);
+
+  const escolhido = candidatos[0]?.nome || 'up';
+
+  if (process.env.DEBUG === 'true') {
+    console.log(`Turno ${gameState.turn}: ${escolhido}`, candidatos);
   }
 
-  // 2. Impedir que a cobra saia do tabuleiro (paredes)
-  const boardWidth = gameState.board.width;
-  const boardHeight = gameState.board.height;
-
-  if (myHead.x + 1 >= boardWidth) {
-    isMoveSafe.right = false;
-  }
-  if (myHead.x - 1 < 0) {
-    isMoveSafe.left = false;
-  }
-  if (myHead.y + 1 >= boardHeight) {
-    isMoveSafe.up = false;
-  }
-  if (myHead.y - 1 < 0) {
-    isMoveSafe.down = false;
-  }
-
-  // 3. Impedir que a cobra bata no próprio corpo
-  const myBody = gameState.you.body;
-  if (myBody) {
-    for (const segment of myBody) {
-      if (segment.x === myHead.x + 1 && segment.y === myHead.y) {
-        isMoveSafe.right = false;
-      }
-      if (segment.x === myHead.x - 1 && segment.y === myHead.y) {
-        isMoveSafe.left = false;
-      }
-      if (segment.x === myHead.x && segment.y === myHead.y + 1) {
-        isMoveSafe.up = false;
-      }
-      if (segment.x === myHead.x && segment.y === myHead.y - 1) {
-        isMoveSafe.down = false;
-      }
-    }
-  }
-
-  // TODO: Passo 3 — impedir que a cobra bata nas adversárias
-  // const opponents = gameState.board.snakes;
-
-  // Sobrou alguma direção segura?
-  const safeMoves = Object.keys(isMoveSafe).filter((direction) => isMoveSafe[direction]);
-
-  if (safeMoves.length === 0) {
-    // Emergência: todas as direções são perigosas.
-    // Escolhemos uma ao acaso entre as 4 — melhor do que uma direção fixa.
-    const allMoves = ["up", "down", "left", "right"];
-    const fallback = allMoves[Math.floor(Math.random() * allMoves.length)];
-    if (process.env.DEBUG === "true") {
-      console.log(`MOVE ${gameState.turn}: sem saída! emergência -> ${fallback}`);
-    }
-    return { move: fallback };
-  }
-
-  // Escolhe uma direção segura ao acaso.
-  const nextMove = safeMoves[Math.floor(Math.random() * safeMoves.length)];
-
-  // TODO: Passo 4 — ir atrás da comida em vez de sortear, para não morrer de fome
-  // const food = gameState.board.food;
-
-  if (process.env.DEBUG === "true") {
-    console.log(`MOVE ${gameState.turn}: ${nextMove}`);
-  }
-  return { move: nextMove };
+  return { move: escolhido };
 }
