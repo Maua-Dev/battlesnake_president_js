@@ -33,8 +33,8 @@ export function info() {
   return {
     apiversion: '1',
     author: '', 
-    color: '#176B87',
-    head: 'tiger-king',
+    color: '#6A0DAD',
+    head: 'evil',
     tail: 'hook',
     version: '1.1.0',
   };
